@@ -95,6 +95,42 @@ class LayoutResponse(BaseModel):
     )
 
 
+class CalibrationLine(BaseModel):
+    """一条基准刻线：设计坐标与纸上实测坐标（毫米）。"""
+
+    design: float = Field(..., description="刻线的设计坐标 mm")
+    measured: float = Field(..., description="刻线在纸上的实测坐标 mm")
+
+
+class CalibrationData(BaseModel):
+    """打印位置校准录入：横、纵两组基准刻线，各至少 2 条。
+
+    x_lines 为纵向刻线（校准 X 方向走纸误差），
+    y_lines 为横向刻线（校准 Y 方向走纸误差）。
+    """
+
+    x_lines: list[CalibrationLine] = Field(
+        ..., min_length=2, description="纵向刻线（测 X），至少 2 条"
+    )
+    y_lines: list[CalibrationLine] = Field(
+        ..., min_length=2, description="横向刻线（测 Y），至少 2 条"
+    )
+
+
+class AxisCalibration(BaseModel):
+    """单方向线性走纸误差：实测坐标 = scale × 设计坐标 + offset。"""
+
+    scale: float = Field(..., description="缩放系数（理想为 1）")
+    offset: float = Field(..., description="平移偏移 mm（理想为 0）")
+
+
+class Calibration(BaseModel):
+    """X / Y 两个方向的线性走纸误差拟合结果。"""
+
+    x: AxisCalibration
+    y: AxisCalibration
+
+
 class SvgRequest(BaseModel):
     """SVG 导出请求：参数与 /api/layout 完全一致，附带页码与显示开关。"""
 
@@ -106,6 +142,11 @@ class SvgRequest(BaseModel):
         description="是否绘制首张纸占用区（预览用；下载/打印应为 false，只含新标签）",
     )
     params: LayoutRequest
+    calibration: CalibrationData | None = Field(
+        None,
+        description="打印位置校准数据；提供时按拟合误差的逆变换修正导出坐标"
+        "（页面常规预览不要传，保持原样）",
+    )
 
 
 class SvgResponse(BaseModel):

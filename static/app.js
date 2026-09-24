@@ -6,6 +6,7 @@ const $ = (id) => document.getElementById(id);
 let lastPlan = null;     // 最近一次 /api/layout 返回的拼版结果
 let lastParams = null;   // 对应的请求参数
 let currentPage = 1;
+let calibrationData = null;  // 已通过求解校验的校准录入（导出时随 /api/svg 发送）
 
 /* ---------------- 标签行 ---------------- */
 
@@ -113,7 +114,14 @@ function validateParams(p) {
   }
 }
 
-async function fetchSvg(page, { showOccupied = false } = {}) {
+async function apiError(resp, fallback) {
+  let detail;
+  try { detail = (await resp.json()).detail; } catch { detail = null; }
+  if (Array.isArray(detail)) return detail.map((d) => d.msg).join("；") || fallback;
+  return detail || fallback;
+}
+
+async function fetchSvg(page, { showOccupied = false, withCalibration = false } = {}) {
   const body = {
     page,
     show_margins: $("show-margins").checked,
@@ -121,12 +129,17 @@ async function fetchSvg(page, { showOccupied = false } = {}) {
     show_occupied: showOccupied,
     params: lastParams,
   };
+  // 仅下载 / 打印携带校准；页面常规预览不带，坐标保持原样
+  if (withCalibration) {
+    const cal = activeCalibration();
+    if (cal) body.calibration = cal;
+  }
   const resp = await fetch("/api/svg", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!resp.ok) throw new Error((await resp.json()).detail || "SVG 生成失败");
+  if (!resp.ok) throw new Error(await apiError(resp, "SVG 生成失败"));
   return resp.text();
 }
 
@@ -183,6 +196,87 @@ function escapeHtml(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
+/* ---------------- 打印位置校准 ---------------- */
+
+function calRow(tag, cls, design) {
+  const row = document.createElement("div");
+  row.className = "cal-row";
+  row.innerHTML = `
+    <span class="z-idx">${tag}</span>
+    <input type="number" class="${cls}-design" value="${design}" step="0.1" title="设计坐标 mm" />
+    <input type="number" class="${cls}-measured" step="0.1" placeholder="实测" title="纸上实测坐标 mm" />
+  `;
+  return row;
+}
+
+function fillCalMarks(marks) {
+  const hosts = [
+    [$("cal-x-rows"), "X", "cx", marks.x_marks],
+    [$("cal-y-rows"), "Y", "cy", marks.y_marks],
+  ];
+  for (const [host, tag, cls, designs] of hosts) {
+    host.innerHTML = "";
+    designs.forEach((d, i) => host.appendChild(calRow(`${tag}${i + 1}`, cls, d)));
+  }
+  invalidateCalibration("");
+}
+
+async function refreshCalMarks(note) {
+  const w = num("page-width"), h = num("page-height");
+  if (!(w > 0) || !(h > 0)) return;
+  try {
+    const resp = await fetch(
+      `/api/calibration/marks?page_width=${w}&page_height=${h}`
+    );
+    if (!resp.ok) return;
+    const marks = await resp.json();
+    // 设计坐标未变化（如同纸张下再次点下载测试页）时保留已填实测值
+    const cur = (sel) =>
+      [...document.querySelectorAll(sel)].map((el) => parseFloat(el.value));
+    const unchanged =
+      JSON.stringify([marks.x_marks, marks.y_marks]) ===
+      JSON.stringify([cur(".cx-design"), cur(".cy-design")]);
+    if (!unchanged) fillCalMarks(marks);
+    if (note) calNote(note);
+  } catch { /* 后端不可用时保持表格原状 */ }
+}
+
+function collectCalibration() {
+  const read = (sel) =>
+    [...document.querySelectorAll(sel)].map((el) => parseFloat(el.value));
+  const xd = read(".cx-design"), xm = read(".cx-measured");
+  const yd = read(".cy-design"), ym = read(".cy-measured");
+  if ([...xd, ...xm, ...yd, ...ym].some((v) => !Number.isFinite(v))) return null;
+  return {
+    x_lines: xd.map((d, i) => ({ design: d, measured: xm[i] })),
+    y_lines: yd.map((d, i) => ({ design: d, measured: ym[i] })),
+  };
+}
+
+function calResultHtml(cls, html) {
+  const el = $("cal-result");
+  el.className = `cal-result ${cls}`;
+  el.innerHTML = html;
+}
+const calOk = (msg) => calResultHtml("ok", msg);
+const calError = (msg) => calResultHtml("err", `<strong>无法校准：</strong>${escapeHtml(msg)}`);
+const calNote = (msg) => calResultHtml("muted", escapeHtml(msg));
+
+function invalidateCalibration(msg) {
+  calibrationData = null;
+  if (msg) calNote(msg);
+}
+
+function activeCalibration() {
+  if (!$("cal-enabled").checked) return null;
+  if (!calibrationData) {
+    throw new Error(
+      "已勾选应用校准，但尚无有效校准参数：请完整填写两组实测坐标后点击「② 计算 X / Y 校准参数」。"
+    );
+  }
+  return calibrationData;
+}
+
 /* ---------------- 事件 ---------------- */
 
 $("add-label").addEventListener("click", () => addLabelRow());
@@ -193,7 +287,59 @@ $("preset").addEventListener("change", (e) => {
   const [w, h] = e.target.value.split(",").map(parseFloat);
   $("page-width").value = w;
   $("page-height").value = h;
+  refreshCalMarks("纸张预设已切换，设计坐标已更新；请重新打印测试页并测量。");
 });
+$("page-width").addEventListener("change", () =>
+  refreshCalMarks("纸张尺寸已修改，设计坐标已更新；请重新打印测试页并测量。"));
+$("page-height").addEventListener("change", () =>
+  refreshCalMarks("纸张尺寸已修改，设计坐标已更新；请重新打印测试页并测量。"));
+
+$("cal-download").addEventListener("click", async () => {
+  const w = num("page-width"), h = num("page-height");
+  if (!(w > 0) || !(h > 0)) { calError("请先填写有效的纸张尺寸。"); return; }
+  await refreshCalMarks("");
+  window.open(`/api/calibration/page?page_width=${w}&page_height=${h}`, "_blank");
+  calNote("测试页已在新窗口打开：请 100% 缩放打印，测量后将读数填入实测列。");
+});
+
+$("cal-solve").addEventListener("click", async () => {
+  const data = collectCalibration();
+  if (!data) {
+    calError("请完整填写两组刻线的设计坐标与纸上实测坐标。");
+    return;
+  }
+  try {
+    const resp = await fetch("/api/calibration/solve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!resp.ok) {
+      calibrationData = null;
+      $("cal-enabled").checked = false;
+      calError(await apiError(resp, "校准求解失败"));
+      return;
+    }
+    const solved = await resp.json();
+    calibrationData = data;
+    $("cal-enabled").checked = true;
+    calOk(
+      "X 方向：缩放 <strong>" + solved.x.scale + "</strong>、偏移 "
+      + "<strong>" + solved.x.offset + "</strong>mm；"
+      + "Y 方向：缩放 <strong>" + solved.y.scale + "</strong>、偏移 "
+      + "<strong>" + solved.y.offset + "</strong>mm。"
+      + "下载 / 打印的 SVG 将按逆变换补偿标签轮廓、裁切线与标注。"
+    );
+  } catch (err) {
+    calError(err.message);
+  }
+});
+
+// 表格行整体随纸张动态重建，输入监听委托给固定的行容器
+$("cal-x-rows").addEventListener("input", () =>
+  invalidateCalibration("校准数据已修改，请重新「计算 X / Y 校准参数」。"));
+$("cal-y-rows").addEventListener("input", () =>
+  invalidateCalibration("校准数据已修改，请重新「计算 X / Y 校准参数」。"));
 
 $("params-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -247,21 +393,39 @@ function downloadBlob(text, filename, type) {
 }
 
 $("download-svg").addEventListener("click", async () => {
-  const svg = await fetchSvg(currentPage);
-  downloadBlob(svg, `labels-page-${currentPage}.svg`, "image/svg+xml");
+  try {
+    const svg = await fetchSvg(currentPage, { withCalibration: true });
+    downloadBlob(svg, `labels-page-${currentPage}.svg`, "image/svg+xml");
+  } catch (err) {
+    alert(err.message);
+  }
 });
 
 $("download-all").addEventListener("click", async () => {
-  for (let p = 1; p <= lastPlan.pages.length; p++) {
-    const svg = await fetchSvg(p);
-    downloadBlob(svg, `labels-page-${p}.svg`, "image/svg+xml");
-    await new Promise((r) => setTimeout(r, 150)); // 避免浏览器拦截批量下载
+  try {
+    activeCalibration();  // 提前校验校准勾选状态，避免中途失败
+    for (let p = 1; p <= lastPlan.pages.length; p++) {
+      const svg = await fetchSvg(p, { withCalibration: true });
+      downloadBlob(svg, `labels-page-${p}.svg`, "image/svg+xml");
+      await new Promise((r) => setTimeout(r, 150)); // 避免浏览器拦截批量下载
+    }
+  } catch (err) {
+    alert(err.message);
   }
 });
 
 $("print-all").addEventListener("click", async () => {
-  const svgs = [];
-  for (let p = 1; p <= lastPlan.pages.length; p++) svgs.push(await fetchSvg(p));
+  let svgs;
+  try {
+    activeCalibration();
+    svgs = [];
+    for (let p = 1; p <= lastPlan.pages.length; p++) {
+      svgs.push(await fetchSvg(p, { withCalibration: true }));
+    }
+  } catch (err) {
+    alert(err.message);
+    return;
+  }
   const w = lastPlan.page_width, h = lastPlan.page_height;
   const win = window.open("", "_blank");
   if (!win) { alert("浏览器拦截了打印窗口，请允许弹窗后重试。"); return; }
@@ -285,3 +449,6 @@ $("print-all").addEventListener("click", async () => {
 addLabelRow({ name: "品名标签", width: 60, height: 30, count: 20, allow_rotate: true });
 addLabelRow({ name: "箱贴", width: 100, height: 70, count: 6, allow_rotate: false });
 addLabelRow({ name: "小标", width: 40, height: 20, count: 50, allow_rotate: true });
+
+// 按默认纸张尺寸预填校准测试页的设计坐标（实测列留空）
+refreshCalMarks("");

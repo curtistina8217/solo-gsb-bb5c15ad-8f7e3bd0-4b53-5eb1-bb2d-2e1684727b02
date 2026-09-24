@@ -72,6 +72,29 @@
           <button type="button" id="add-label" class="ghost">＋ 添加一种标签</button>
         </fieldset>
 
+        <fieldset>
+          <legend>打印位置校准（可选）</legend>
+          <p class="hint">打印机走纸误差会让标签整体偏移 / 缩放。先按当前纸张尺寸
+            <strong>100% 缩放</strong>打印校准测试页（关闭「适应页面」），用尺测量每条基准刻线
+            在纸上的实际位置——竖直实线量到纸<strong>左缘</strong>、水平虚线量到纸<strong>顶缘</strong>，
+            填入实测列后计算校准参数。校准仅作用于下载 / 打印的 SVG，
+            页面预览与 <code>/api/layout</code> 的坐标、数量保持原样。</p>
+          <button type="button" id="cal-download" class="ghost">① 打开 / 下载校准测试页（按当前纸张）</button>
+          <div class="cal-tables">
+            <div class="cal-table">
+              <div class="cal-head"><span>刻线</span><span>设计 X (mm)</span><span>实测 X (mm)</span></div>
+              <div id="cal-x-rows"></div>
+            </div>
+            <div class="cal-table">
+              <div class="cal-head"><span>刻线</span><span>设计 Y (mm)</span><span>实测 Y (mm)</span></div>
+              <div id="cal-y-rows"></div>
+            </div>
+          </div>
+          <button type="button" id="cal-solve" class="ghost">② 计算 X / Y 校准参数</button>
+          <div id="cal-result" class="cal-result muted">尚未计算校准参数。</div>
+          <label class="inline cal-enable"><input type="checkbox" id="cal-enabled" /> 下载 / 打印 SVG 时应用校准逆变换补偿</label>
+        </fieldset>
+
         <button type="submit" class="primary">生成拼版</button>
       </form>
     </section>
