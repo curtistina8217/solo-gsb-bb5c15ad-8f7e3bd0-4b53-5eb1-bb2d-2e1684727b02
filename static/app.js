@@ -6,6 +6,8 @@ const $ = (id) => document.getElementById(id);
 let lastPlan = null;     // 最近一次 /api/layout 返回的拼版结果
 let lastParams = null;   // 对应的请求参数
 let currentPage = 1;
+let activeCalibration = null;  // 已应用的校准参数（仅用于下载/打印）
+let markDefaults = { x: [], y: [] };  // 测试页默认刻线设计坐标
 
 /* ---------------- 标签行 ---------------- */
 
@@ -113,12 +115,13 @@ function validateParams(p) {
   }
 }
 
-async function fetchSvg(page, { showOccupied = false } = {}) {
+async function fetchSvg(page, { showOccupied = false, calibration = null } = {}) {
   const body = {
     page,
     show_margins: $("show-margins").checked,
     show_annotations: $("show-annotations").checked,
     show_occupied: showOccupied,
+    calibration: calibration || null,
     params: lastParams,
   };
   const resp = await fetch("/api/svg", {
@@ -132,7 +135,8 @@ async function fetchSvg(page, { showOccupied = false } = {}) {
 
 async function renderPage() {
   if (!lastPlan) return;
-  // 预览显示灰色占用区（仅第一页有），与下载/打印的 SVG 坐标完全一致
+  // 预览显示灰色占用区（仅第一页有），与下载/打印的 SVG 坐标完全一致；
+  // 预览永不应用校准补偿（calibration=null），坐标与 /api/layout 一致
   const svg = await fetchSvg(currentPage, { showOccupied: true });
   $("svg-host").innerHTML = svg;
   $("page-info").textContent = `${currentPage} / ${lastPlan.pages.length}`;
@@ -246,22 +250,43 @@ function downloadBlob(text, filename, type) {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 
+function exportCalibration() {
+  // 仅在勾选“导出时应用校准补偿”且已应用校准时返回校准参数
+  return $("apply-calib-export").checked && activeCalibration
+    ? activeCalibration
+    : null;
+}
+
+function alertExportError(err) {
+  alert(`导出被阻止：${err.message}`);
+}
+
 $("download-svg").addEventListener("click", async () => {
-  const svg = await fetchSvg(currentPage);
-  downloadBlob(svg, `labels-page-${currentPage}.svg`, "image/svg+xml");
+  try {
+    const svg = await fetchSvg(currentPage, { calibration: exportCalibration() });
+    downloadBlob(svg, `labels-page-${currentPage}.svg`, "image/svg+xml");
+  } catch (err) { alertExportError(err); }
 });
 
 $("download-all").addEventListener("click", async () => {
-  for (let p = 1; p <= lastPlan.pages.length; p++) {
-    const svg = await fetchSvg(p);
-    downloadBlob(svg, `labels-page-${p}.svg`, "image/svg+xml");
-    await new Promise((r) => setTimeout(r, 150)); // 避免浏览器拦截批量下载
-  }
+  const calib = exportCalibration();
+  try {
+    for (let p = 1; p <= lastPlan.pages.length; p++) {
+      const svg = await fetchSvg(p, { calibration: calib });
+      downloadBlob(svg, `labels-page-${p}.svg`, "image/svg+xml");
+      await new Promise((r) => setTimeout(r, 150)); // 避免浏览器拦截批量下载
+    }
+  } catch (err) { alertExportError(err); }
 });
 
 $("print-all").addEventListener("click", async () => {
+  const calib = exportCalibration();
   const svgs = [];
-  for (let p = 1; p <= lastPlan.pages.length; p++) svgs.push(await fetchSvg(p));
+  try {
+    for (let p = 1; p <= lastPlan.pages.length; p++) {
+      svgs.push(await fetchSvg(p, { calibration: calib }));
+    }
+  } catch (err) { alertExportError(err); return; }
   const w = lastPlan.page_width, h = lastPlan.page_height;
   const win = window.open("", "_blank");
   if (!win) { alert("浏览器拦截了打印窗口，请允许弹窗后重试。"); return; }
@@ -280,8 +305,202 @@ $("print-all").addEventListener("click", async () => {
   setTimeout(() => win.print(), 400);
 });
 
+/* ---------------- 打印位置校准 ---------------- */
+
+function addCalibRow(axis, designed, measured) {
+  const row = document.createElement("div");
+  row.className = "calib-row";
+  row.innerHTML = `
+    <input type="number" class="c-des" step="0.1" title="刻线设计坐标 mm" value="${designed ?? ""}" placeholder="设计" />
+    <input type="number" class="c-mea" step="0.1" min="0" title="纸上实测坐标 mm" value="${measured ?? ""}" placeholder="实测" />
+    <button type="button" class="del" title="删除">✕</button>
+  `;
+  row.querySelector(".del").addEventListener("click", () => row.remove());
+  $(`calib-${axis}-rows`).appendChild(row);
+}
+
+async function refreshMarkDefaults(preserveRows) {
+  const pw = parseFloat($("page-width").value);
+  const ph = parseFloat($("page-height").value);
+  if (!(pw > 0) || !(ph > 0)) return;
+  let data;
+  try {
+    const resp = await fetch("/api/calibration/marks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page_width: pw, page_height: ph }),
+    });
+    if (!resp.ok) throw new Error((await resp.json()).detail);
+    data = await resp.json();
+  } catch (err) {
+    return; // 纸张过小等情况：保留现有录入，不打扰用户
+  }
+  const prev = markDefaults;
+  markDefaults = { x: data.x_designed, y: data.y_designed };
+
+  for (const axis of ["x", "y"]) {
+    const container = $(`calib-${axis}-rows`);
+    const rows = [...container.querySelectorAll(".calib-row")];
+    const defaults = markDefaults[axis];
+    if (!rows.length) {
+      // 首次进入：填入该纸张尺寸的默认刻线
+      defaults.forEach((d) => addCalibRow(axis, d, ""));
+      continue;
+    }
+    if (!preserveRows) continue;
+    // 纸张尺寸变化：仅更新“仍是默认刻线且未填实测”的行（按序号对齐），
+    // 用户手动改过设计坐标或已填实测的行原样保留
+    rows.forEach((row, i) => {
+      const newD = defaults[i];
+      const oldD = prev[axis] ? prev[axis][i] : undefined;
+      if (newD === undefined || oldD === undefined) return;
+      const desEl = row.querySelector(".c-des");
+      const meaEl = row.querySelector(".c-mea");
+      if (Math.abs(parseFloat(desEl.value) - oldD) < 1e-6 && meaEl.value.trim() === "") {
+        desEl.value = newD;
+      }
+    });
+  }
+}
+
+function collectCalibration() {
+  const readAxis = (axis) =>
+    [...$(`calib-${axis}-rows`).querySelectorAll(".calib-row")]
+      .map((row) => ({
+        designed: parseFloat(row.querySelector(".c-des").value),
+        measured: parseFloat(row.querySelector(".c-mea").value),
+      }))
+      .filter((p) => Number.isFinite(p.designed) && Number.isFinite(p.measured));
+  return { x_points: readAxis("x"), y_points: readAxis("y") };
+}
+
+function renderCalibResult(ok, payload) {
+  const el = $("calib-result");
+  el.hidden = false;
+  el.classList.toggle("error", !ok);
+  if (!ok) {
+    el.innerHTML = `<strong>校准未应用：</strong>${escapeHtml(payload)}`;
+    return;
+  }
+  const row = (name, r) => `
+    <tr>
+      <td>${name}</td>
+      <td>${r.used} 条</td>
+      <td>${r.scale_percent.toFixed(3)}%</td>
+      <td>${r.offset > 0 ? "+" : ""}${r.offset.toFixed(2)} mm</td>
+    </tr>`;
+  el.innerHTML = `
+    <strong>校准已生效（仅下载 / 打印时补偿，预览与排版坐标不变）。</strong>
+    <table>
+      <thead><tr><th>方向</th><th>刻线</th><th>走纸比例 k</th><th>零位偏移 b</th></tr></thead>
+      <tbody>${row("X（横向走纸）", payload.x)}${row("Y（纵向走纸）", payload.y)}</tbody>
+    </table>
+    <div class="fit-note">已检查全部 ${payload.page_count} 页：补偿后的标签轮廓与裁切线均在纸张内 ✔</div>`;
+}
+
+$("apply-calib").addEventListener("click", async () => {
+  if (!lastParams) {
+    renderCalibResult(false, "请先点击「生成拼版」，校准需要基于当前排版检查补偿是否超出纸张。");
+    return;
+  }
+  const calibration = collectCalibration();
+  if (!calibration.x_points.length && !calibration.y_points.length) {
+    renderCalibResult(false, "请至少录入一个方向的刻线实测值。");
+    return;
+  }
+  try {
+    const resp = await fetch("/api/calibration/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ params: lastParams, calibration }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || "校准校验失败");
+    activeCalibration = calibration;
+    const cb = $("apply-calib-export");
+    cb.disabled = false;
+    cb.checked = true;
+    renderCalibResult(true, data);
+  } catch (err) {
+    activeCalibration = null;
+    const cb = $("apply-calib-export");
+    cb.checked = false;
+    renderCalibResult(false, err.message);
+  }
+});
+
+$("clear-calib").addEventListener("click", () => {
+  activeCalibration = null;
+  const cb = $("apply-calib-export");
+  cb.checked = false;
+  cb.disabled = true;
+  $("calib-result").hidden = true;
+  $("calib-result").innerHTML = "";
+  for (const axis of ["x", "y"]) {
+    const container = $(`calib-${axis}-rows`);
+    container.innerHTML = "";
+    markDefaults[axis].forEach((d) => addCalibRow(axis, d, ""));
+  }
+});
+
+document.querySelectorAll(".calib-add").forEach((btn) => {
+  btn.addEventListener("click", () => addCalibRow(btn.dataset.axis, "", ""));
+});
+
+async function fetchTestPageSvg() {
+  const pw = parseFloat($("page-width").value);
+  const ph = parseFloat($("page-height").value);
+  if (!(pw > 0) || !(ph > 0)) throw new Error("请先填写有效的纸张宽、高。");
+  const resp = await fetch(
+    `/api/calibration/test-page?width=${pw}&height=${ph}`
+  );
+  if (!resp.ok) throw new Error((await resp.json()).detail || "测试页生成失败");
+  return { svg: await resp.text(), w: pw, h: ph };
+}
+
+function printSvgInWindow(svg, w, h, title) {
+  const win = window.open("", "_blank");
+  if (!win) throw new Error("浏览器拦截了打印窗口，请允许弹窗后重试。");
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>
+    <style>
+      @page { size: ${w}mm ${h}mm; margin: 0; }
+      html,body { margin:0; padding:0; }
+      .sheet { width:${w}mm; height:${h}mm; overflow:hidden; }
+      svg { display:block; width:${w}mm; height:${h}mm; }
+    </style></head><body><div class="sheet">${svg}</div></body></html>`);
+  win.document.close();
+  win.focus();
+  setTimeout(() => win.print(), 400);
+}
+
+$("print-calib-page").addEventListener("click", async () => {
+  try {
+    const { svg, w, h } = await fetchTestPageSvg();
+    printSvgInWindow(svg, w, h, "校准测试页");
+  } catch (err) { alert(err.message); }
+});
+
+$("download-calib-page").addEventListener("click", async () => {
+  try {
+    const { svg } = await fetchTestPageSvg();
+    downloadBlob(svg, "calibration-test-page.svg", "image/svg+xml");
+  } catch (err) { alert(err.message); }
+});
+
 /* ---------------- 初始数据 ---------------- */
 
 addLabelRow({ name: "品名标签", width: 60, height: 30, count: 20, allow_rotate: true });
 addLabelRow({ name: "箱贴", width: 100, height: 70, count: 6, allow_rotate: false });
 addLabelRow({ name: "小标", width: 40, height: 20, count: 50, allow_rotate: true });
+
+// 按当前纸张尺寸预填校准刻线设计坐标
+refreshMarkDefaults();
+
+// 纸张尺寸变化时刷新默认刻线；用户已录入的行（含实测值）原样保留
+let markRefreshTimer = null;
+for (const id of ["page-width", "page-height", "preset"]) {
+  $(id).addEventListener("change", () => {
+    clearTimeout(markRefreshTimer);
+    markRefreshTimer = setTimeout(() => refreshMarkDefaults(true), 200);
+  });
+}

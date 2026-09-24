@@ -9,7 +9,7 @@
 <body>
   <header class="topbar">
     <h1>小批量标签拼版工具</h1>
-    <span class="subtitle">毫米坐标 · 自动排版 · 续页 · 首张纸占用区避让 · 可打印 SVG 导出</span>
+    <span class="subtitle">毫米坐标 · 自动排版 · 续页 · 首张纸占用区避让 · 打印位置校准 · 可打印 SVG 导出</span>
   </header>
 
   <main class="layout">
@@ -55,6 +55,41 @@
           </div>
         </fieldset>
 
+        <fieldset id="calib-fieldset">
+          <legend>打印位置校准（可选）</legend>
+          <p class="hint">打印机走纸存在缩放 / 偏移误差时，先打印校准测试页，
+            实测横、纵两组基准刻线的位置并录入，导出的标签轮廓、裁切线和标注
+            会自动按逆变换补偿。<strong>页面预览与排版坐标不受影响。</strong></p>
+          <div class="calib-actions">
+            <button type="button" id="print-calib-page" class="ghost">打印校准测试页</button>
+            <button type="button" id="download-calib-page" class="ghost">下载测试页 SVG</button>
+          </div>
+
+          <div class="calib-group">
+            <div class="calib-title">纵向刻线 → X 方向（量到纸左边缘的距离）</div>
+            <div class="calib-head">
+              <span>设计 X</span><span>实测 X</span><span></span>
+            </div>
+            <div id="calib-x-rows" class="calib-rows"></div>
+            <button type="button" class="ghost calib-add" data-axis="x">＋ 添加 X 刻线</button>
+          </div>
+
+          <div class="calib-group">
+            <div class="calib-title">横向刻线 → Y 方向（量到纸上边缘的距离）</div>
+            <div class="calib-head">
+              <span>设计 Y</span><span>实测 Y</span><span></span>
+            </div>
+            <div id="calib-y-rows" class="calib-rows"></div>
+            <button type="button" class="ghost calib-add" data-axis="y">＋ 添加 Y 刻线</button>
+          </div>
+
+          <div class="calib-buttons">
+            <button type="button" id="apply-calib">计算并应用校准</button>
+            <button type="button" id="clear-calib" class="ghost">清除校准</button>
+          </div>
+          <div id="calib-result" class="calib-result" hidden></div>
+        </fieldset>
+
         <fieldset>
           <legend>首张纸占用区（mm，可多个）</legend>
           <p class="hint">复用已贴过标签的纸张：以纸张左上角为原点填写已占用矩形，
@@ -90,6 +125,9 @@
           <div class="toggles">
             <label class="inline"><input type="checkbox" id="show-margins" checked /> 页边距参考线</label>
             <label class="inline"><input type="checkbox" id="show-annotations" checked /> 标签标注</label>
+            <label class="inline" title="仅作用于下载/打印的 SVG，预览不补偿">
+              <input type="checkbox" id="apply-calib-export" disabled /> 导出时应用校准补偿
+            </label>
           </div>
           <div class="actions">
             <button type="button" id="download-svg">下载本页 SVG</button>

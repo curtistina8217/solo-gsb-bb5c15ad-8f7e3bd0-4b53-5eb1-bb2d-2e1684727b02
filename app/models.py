@@ -95,8 +95,41 @@ class LayoutResponse(BaseModel):
     )
 
 
+class CalibPoint(BaseModel):
+    """一条校准刻线：设计坐标与打印后在纸上的实测坐标，单位毫米。
+
+    X 方向对应纵向刻线（测量其到纸张左边缘的距离），
+    Y 方向对应横向刻线（测量其到纸张上边缘的距离）。
+    """
+
+    designed: float = Field(..., description="刻线设计坐标 mm")
+    measured: float = Field(..., description="纸上实测坐标 mm")
+
+
+class Calibration(BaseModel):
+    """打印位置校准参数（仅作用于下载 / 打印 SVG，不影响排版坐标）。"""
+
+    x_points: list[CalibPoint] = Field(
+        default_factory=list, description="纵向刻线：X 方向设计/实测坐标"
+    )
+    y_points: list[CalibPoint] = Field(
+        default_factory=list, description="横向刻线：Y 方向设计/实测坐标"
+    )
+
+
+class CalibrationRequest(BaseModel):
+    """校准校验请求：当前排版参数 + 刻线录入数据。"""
+
+    params: LayoutRequest
+    calibration: Calibration
+
+
 class SvgRequest(BaseModel):
-    """SVG 导出请求：参数与 /api/layout 完全一致，附带页码与显示开关。"""
+    """SVG 导出请求：参数与 /api/layout 完全一致，附带页码与显示开关。
+
+    calibration 仅在下载 / 打印时传入；常规预览传 null，坐标与
+    /api/layout 保持一致。
+    """
 
     page: int = Field(1, ge=1)
     show_margins: bool = True
@@ -104,6 +137,10 @@ class SvgRequest(BaseModel):
     show_occupied: bool = Field(
         False,
         description="是否绘制首张纸占用区（预览用；下载/打印应为 false，只含新标签）",
+    )
+    calibration: Calibration | None = Field(
+        None,
+        description="打印位置校准（仅修正导出的标签轮廓/裁切线/标注）；预览为 null",
     )
     params: LayoutRequest
 

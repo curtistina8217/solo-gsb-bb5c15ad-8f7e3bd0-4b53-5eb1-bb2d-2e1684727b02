@@ -159,3 +159,57 @@ button:disabled { opacity: 0.45; cursor: default; }
   margin-top: 10px; padding: 8px 10px; border-radius: 6px;
   background: #fee2e2; color: #991b1b; font-size: 13px;
 }
+
+/* ---------------- 打印位置校准 ---------------- */
+
+.calib-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.calib-group { margin-bottom: 10px; }
+.calib-title {
+  font-size: 12px; font-weight: 600; color: #374151; margin-bottom: 4px;
+}
+.calib-head, .calib-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.calib-head {
+  font-size: 11px; color: var(--muted); margin-bottom: 2px;
+}
+.calib-head span:first-child { padding-left: 2px; }
+.calib-row input[type="number"] { margin-top: 0; }
+.calib-row .del {
+  border: none; background: none; color: var(--danger);
+  font-size: 16px; cursor: pointer; padding: 0 4px;
+}
+button.calib-add {
+  width: 100%; border-style: dashed; color: var(--accent);
+  padding: 5px; font-size: 12px;
+}
+.calib-buttons {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-top: 4px;
+}
+.calib-buttons button { padding: 7px 10px; }
+.calib-result {
+  margin-top: 10px; padding: 8px 10px; border-radius: 6px;
+  background: #ecfdf5; color: #065f46; font-size: 12.5px; line-height: 1.6;
+}
+.calib-result.error {
+  background: #fee2e2; color: #991b1b;
+}
+.calib-result table { width: 100%; border-collapse: collapse; margin-top: 4px; }
+.calib-result th, .calib-result td {
+  text-align: right; padding: 2px 6px; border-bottom: 1px solid #a7f3d0;
+}
+.calib-result th:first-child, .calib-result td:first-child { text-align: left; }
+.calib-result .fit-note { margin-top: 4px; color: #047857; }
+.calib-result.error .fit-note { color: #991b1b; font-weight: 600; }

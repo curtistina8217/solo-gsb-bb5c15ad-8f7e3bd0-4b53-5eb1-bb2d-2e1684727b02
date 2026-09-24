@@ -21,9 +21,21 @@ def main() -> int:
         print(f"[bootstrap] 依赖缺失: {exc}", file=sys.stderr)
         return 1
 
+    from .calibration import (
+        CalibrationTransform,
+        AxisFit,
+        build_transform,
+        check_all_pages_fit,
+    )
     from .layout import compute_layout
-    from .models import LayoutRequest, LabelSpec, OccupiedZone
-    from .svg import build_svg
+    from .models import (
+        Calibration,
+        CalibPoint,
+        LayoutRequest,
+        LabelSpec,
+        OccupiedZone,
+    )
+    from .svg import build_calibration_svg, build_svg, default_calibration_marks
 
     # 用一个最小样例冒烟测试排版 + SVG 管线
     smoke = LayoutRequest(
@@ -81,6 +93,74 @@ def main() -> int:
     _expect_error(OccupiedZone(x=120, y=10, width=100, height=10))
     _expect_error(OccupiedZone(x=10, y=250, width=10, height=60))
     _expect_error(OccupiedZone(x=-1, y=0, width=10, height=10))
+
+    # ---- 打印位置校准 ----
+    # 校准测试页：含横、纵两组刻线，设计坐标与默认接口一致
+    xs, ys = default_calibration_marks(210, 297)
+    assert len(xs) == 3 and len(ys) == 3 and xs[0] == 20 and xs[-1] == 190
+    test_svg = build_calibration_svg(210, 297)
+    assert 'class="xt' in test_svg and 'class="yt' in test_svg
+    assert "X=20" in test_svg and "Y=20" in test_svg
+    assert test_svg.count('<line class="xt tick"') == 3
+    assert test_svg.count('<line class="yt tick"') == 3
+
+    # 线性拟合：实测 = 1.002·设计 + 1.5（均匀采样，最小二乘应精确还原）
+    cal_ok = Calibration(
+        x_points=[CalibPoint(designed=d, measured=1.002 * d + 1.5) for d in xs],
+        y_points=[CalibPoint(designed=d, measured=0.998 * d - 0.8) for d in ys],
+    )
+    tr = build_transform(cal_ok)
+    assert abs(tr.x.scale - 1.002) < 1e-9 and abs(tr.x.offset - 1.5) < 1e-9
+    assert abs(tr.y.scale - 0.998) < 1e-9 and abs(tr.y.offset - (-0.8)) < 1e-9
+    # 逆变换把实测位置映回设计位置：inverse(k·d+b) == d
+    assert abs(tr.x.inverse(1.002 * 50 + 1.5) - 50) < 1e-9
+    a, b, c, d, e, f = tr.matrix_values()
+    assert b == 0 and c == 0 and abs(a - 1 / 1.002) < 1e-12
+
+    # 补偿后的导出 SVG：标签内容包在 matrix 分组内，且坐标/数量与排版一致
+    calib_svg = build_svg(plan, 1, transform=tr)
+    assert "<g transform=" in calib_svg
+    assert 'class="marginguide"' in calib_svg  # 页边距参考线仍在组外、不补偿
+    # 恒等校准不输出分组，与未校准时字节一致
+    assert "<g transform=" not in build_svg(plan, 1)
+    assert build_svg(plan, 1) == build_svg(plan, 1, transform=build_transform(None))
+
+    # 单点刻线按纯平移处理（k=1）
+    one = build_transform(
+        Calibration(x_points=[CalibPoint(designed=50, measured=52)])
+    )
+    assert one.x.scale == 1.0 and abs(one.x.offset - 2.0) < 1e-9 and one.y.used == 0
+
+    # 阻止条件①：基准点重合（设计坐标相同）
+    for bad_cal, kw in [
+        (Calibration(x_points=[
+            CalibPoint(designed=50, measured=50),
+            CalibPoint(designed=50, measured=51),
+        ]), "重合"),
+        # 阻止条件②：实测顺序颠倒
+        (Calibration(x_points=[
+            CalibPoint(designed=20, measured=90),
+            CalibPoint(designed=100, measured=30),
+        ]), "颠倒"),
+    ]:
+        try:
+            bad_tr = build_transform(bad_cal)
+            check_all_pages_fit(plan, bad_tr)
+        except ValueError as exc:
+            assert kw in str(exc), f"错误信息缺少「{kw}」: {exc}"
+        else:
+            raise AssertionError(f"校准异常（{kw}）未被阻止")
+
+    # 阻止条件③：补偿超出纸张。给一个极大 X 缩放，逆变换后标签越过纸右缘
+    big = CalibrationTransform(
+        x=AxisFit(scale=0.5, offset=0.0, used=2), y=AxisFit(1.0, 0.0, 0)
+    )
+    try:
+        check_all_pages_fit(plan, big)
+    except ValueError as exc:
+        assert "超出纸张" in str(exc)
+    else:
+        raise AssertionError("补偿越界未被阻止")
 
     print(f"[bootstrap] 自检通过（FastAPI {fastapi.__version__}, "
           f"Pydantic {pydantic.VERSION}）")
